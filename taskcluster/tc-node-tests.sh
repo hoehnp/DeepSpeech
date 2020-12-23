@@ -11,6 +11,9 @@ if [ -z "${nodever}" ]; then
     exit 1
 fi;
 
+bitrate=$2
+set_ldc_sample_filename "${bitrate}"
+
 download_data
 
 node --version
@@ -21,9 +24,18 @@ NODE_CACHE="${DS_ROOT_TASK}/ds-test.cache/"
 export NODE_PATH="${NODE_ROOT}/node_modules/"
 export PATH="${NODE_ROOT}:${NODE_PATH}/.bin/:$PATH"
 
+# make sure that NODE_ROOT really exists
+mkdir -p ${NODE_ROOT}
+
 deepspeech_npm_url=$(get_dep_npm_pkg_url)
 npm install --prefix ${NODE_ROOT} --cache ${NODE_CACHE} ${deepspeech_npm_url}
 
 check_runtime_nodejs
 
+ensure_cuda_usage "$3"
+
 run_all_inference_tests
+
+run_js_streaming_inference_tests
+
+run_hotword_tests

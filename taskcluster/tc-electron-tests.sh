@@ -17,6 +17,9 @@ if [ -z "${electronver}" ]; then
     exit 1
 fi;
 
+bitrate=$3
+set_ldc_sample_filename "${bitrate}"
+
 download_data
 
 node --version
@@ -26,6 +29,9 @@ NODE_ROOT="${DS_ROOT_TASK}/ds-test/"
 NODE_CACHE="${DS_ROOT_TASK}/ds-test.cache/"
 export NODE_PATH="${NODE_ROOT}/node_modules/"
 export PATH="${NODE_ROOT}:${NODE_PATH}/.bin/:${NODE_PATH}/electron/dist/:$PATH"
+
+# make sure that NODE_ROOT really exists
+mkdir -p ${NODE_ROOT}
 
 npm install --prefix ${NODE_ROOT} --cache ${NODE_CACHE} electron@${electronver}
 
@@ -55,6 +61,8 @@ fi
 node --version
 
 check_runtime_electronjs
+
+ensure_cuda_usage "$4"
 
 run_electronjs_inference_tests
 

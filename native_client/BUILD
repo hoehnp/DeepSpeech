@@ -1,10 +1,10 @@
 # Description: Deepspeech native client library.
 
-load(
-    "@org_tensorflow//tensorflow:tensorflow.bzl",
-    "if_cuda",
-    "tf_cc_shared_object",
-)
+load("@org_tensorflow//tensorflow:tensorflow.bzl", "tf_cc_shared_object", "tf_copts", "lrt_if_needed")
+load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
+load("@com_github_nelhage_rules_boost//:boost/boost.bzl", "boost_deps")
+load("@build_bazel_rules_apple//apple:ios.bzl", "ios_static_framework")
+
 load(
     "@org_tensorflow//tensorflow/lite:build_def.bzl",
     "tflite_copts",
@@ -18,6 +18,20 @@ config_setting(
     },
 )
 
+config_setting(
+    name = "rpi3",
+    define_values = {
+        "target_system": "rpi3"
+    },
+)
+
+config_setting(
+    name = "rpi3-armv8",
+    define_values = {
+        "target_system": "rpi3-armv8"
+    },
+)
+
 genrule(
     name = "workspace_status",
     outs = ["workspace_status.cc"],
@@ -27,20 +41,6 @@ genrule(
     tools = [":gen_workspace_status.sh"],
 )
 
-KENLM_SOURCES = glob(
-    [
-        "kenlm/lm/*.cc",
-        "kenlm/util/*.cc",
-        "kenlm/util/double-conversion/*.cc",
-        "kenlm/lm/*.hh",
-        "kenlm/util/*.hh",
-        "kenlm/util/double-conversion/*.h",
-    ],
-    exclude = [
-        "kenlm/*/*test.cc",
-        "kenlm/*/*main.cc",
-    ],
-)
 
 OPENFST_SOURCES_PLATFORM = select({
     "//tensorflow:windows": glob(["ctcdecode/third_party/openfst-1.6.9-win/src/lib/*.cc"]),
@@ -61,6 +61,27 @@ LINUX_LINKOPTS = [
 ]
 
 cc_library(
+    name = "kenlm",
+    srcs = glob([
+        "kenlm/lm/*.cc",
+        "kenlm/util/*.cc",
+        "kenlm/util/double-conversion/*.cc",
+        "kenlm/util/double-conversion/*.h",
+    ],
+    exclude = [
+        "kenlm/*/*test.cc",
+        "kenlm/*/*main.cc",
+    ],),
+    hdrs = glob([
+        "kenlm/lm/*.hh",
+        "kenlm/util/*.hh",
+    ]),
+    copts = ["-std=c++11"],
+    defines = ["KENLM_MAX_ORDER=6"],
+    includes = ["kenlm"],
+)
+
+cc_library(
     name = "decoder",
     srcs = [
         "ctcdecode/ctc_beam_search_decoder.cpp",
@@ -69,29 +90,37 @@ cc_library(
         "ctcdecode/scorer.cpp",
         "ctcdecode/path_trie.cpp",
         "ctcdecode/path_trie.h",
-    ] + KENLM_SOURCES + OPENFST_SOURCES_PLATFORM,
+        "alphabet.cc",
+    ] + OPENFST_SOURCES_PLATFORM,
     hdrs = [
         "ctcdecode/ctc_beam_search_decoder.h",
         "ctcdecode/scorer.h",
+        "ctcdecode/decoder_utils.h",
+        "alphabet.h",
     ],
-    defines = ["KENLM_MAX_ORDER=6"],
     includes = [
         ".",
         "ctcdecode/third_party/ThreadPool",
-        "kenlm",
+        "ctcdecode/third_party/object_pool",
     ] + OPENFST_INCLUDES_PLATFORM,
+    deps = [":kenlm"],
+    linkopts = [
+        "-lm",
+        "-ldl",
+        "-pthread",
+    ],
 )
 
-tf_cc_shared_object(
-    name = "libdeepspeech.so",
+cc_library(
+    name = "deepspeech_bundle",
     srcs = [
         "deepspeech.cc",
         "deepspeech.h",
-        "alphabet.h",
-        "modelstate.h",
+        "deepspeech_errors.cc",
         "modelstate.cc",
-        "workspace_status.h",
+        "modelstate.h",
         "workspace_status.cc",
+        "workspace_status.h",
     ] + select({
         "//native_client:tflite": [
             "tflitemodelstate.h",
@@ -102,7 +131,7 @@ tf_cc_shared_object(
             "tfmodelstate.cc",
         ],
     }),
-    copts = select({
+    copts = tf_copts() + select({
         # -fvisibility=hidden is not required on Windows, MSCV hides all declarations by default
         "//tensorflow:windows": ["/w"],
         # -Wno-sign-compare to silent a lot of warnings from tensorflow itself,
@@ -115,17 +144,19 @@ tf_cc_shared_object(
         "//native_client:tflite": ["-DUSE_TFLITE"],
         "//conditions:default": ["-UUSE_TFLITE"],
     }) + tflite_copts(),
-    linkopts = select({
+    linkopts = lrt_if_needed() + select({
         "//tensorflow:macos": [],
+        "//tensorflow:ios": ["-fembed-bitcode"],
         "//tensorflow:linux_x86_64": LINUX_LINKOPTS,
-        "//tensorflow:rpi3": LINUX_LINKOPTS + ["-l:libstdc++.a"],
-        "//tensorflow:rpi3-armv8": LINUX_LINKOPTS + ["-l:libstdc++.a"],
+        "//native_client:rpi3": LINUX_LINKOPTS,
+        "//native_client:rpi3-armv8": LINUX_LINKOPTS,
         "//tensorflow:windows": [],
         "//conditions:default": [],
     }) + tflite_linkopts(),
     deps = select({
         "//native_client:tflite": [
             "//tensorflow/lite/kernels:builtin_ops",
+            "//tensorflow/lite/tools/evaluation:utils",
         ],
         "//conditions:default": [
             "//tensorflow/core:core_cpu",
@@ -137,7 +168,6 @@ tf_cc_shared_object(
             ### CPU only build, libdeepspeech.so file size reduced by ~50%
             "//tensorflow/core/kernels:spectrogram_op",  # AudioSpectrogram
             "//tensorflow/core/kernels:bias_op",  # BiasAdd
-            "//tensorflow/contrib/rnn:lstm_ops_kernels",  # BlockLSTM
             "//tensorflow/core/kernels:cast_op",  # Cast
             "//tensorflow/core/kernels:concat_op",  # ConcatV2
             "//tensorflow/core/kernels:constant_op",  # Const, Placeholder
@@ -157,9 +187,10 @@ tf_cc_shared_object(
             "//tensorflow/core/kernels:softmax_op",  # Softmax
             "//tensorflow/core/kernels:tile_ops",  # Tile
             "//tensorflow/core/kernels:transpose_op",  # Transpose
+            "//tensorflow/core/kernels:rnn_ops",  # BlockLSTM
             # And we also need the op libs for these ops used in the model:
             "//tensorflow/core:audio_ops_op_lib",  # AudioSpectrogram, Mfcc
-            "//tensorflow/contrib/rnn:lstm_ops_op_lib",  # BlockLSTM
+            "//tensorflow/core:rnn_ops_op_lib",  # BlockLSTM
             "//tensorflow/core:math_ops_op_lib",  # Cast, Less, Max, MatMul, Minimum, Range
             "//tensorflow/core:array_ops_op_lib",  # ConcatV2, Const, ExpandDims, Fill, GatherNd, Identity, Pack, Placeholder, Reshape, Tile, Transpose
             "//tensorflow/core:no_op_op_lib",  # NoOp
@@ -173,6 +204,19 @@ tf_cc_shared_object(
     ]) + [":decoder"],
 )
 
+tf_cc_shared_object(
+    name = "libdeepspeech.so",
+    deps = [":deepspeech_bundle"],
+)
+
+ios_static_framework(
+    name = "deepspeech_ios",
+    deps = [":deepspeech_bundle"],
+    families = ["iphone", "ipad"],
+    minimum_os_version = "9.0",
+    linkopts = ["-lstdc++"],
+)
+
 genrule(
     name = "libdeepspeech_so_dsym",
     srcs = [":libdeepspeech.so"],
@@ -182,18 +226,38 @@ genrule(
 )
 
 cc_binary(
-    name = "generate_trie",
+    name = "generate_scorer_package",
     srcs = [
-        "alphabet.h",
-        "generate_trie.cpp",
+        "generate_scorer_package.cpp",
+        "deepspeech_errors.cc",
     ],
     copts = ["-std=c++11"],
+    deps = [
+        ":decoder",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/types:optional",
+        "@boost//:program_options",
+    ],
+    linkstatic = 1,
     linkopts = [
         "-lm",
         "-ldl",
         "-pthread",
+    ] + select({
+        # ARMv7: error: Android 5.0 and later only support position-independent executables (-fPIE).
+        "//tensorflow:android": ["-fPIE -pie"],
+        "//conditions:default": [],
+    }),
+)
+
+cc_binary(
+    name = "enumerate_kenlm_vocabulary",
+    srcs = [
+        "enumerate_kenlm_vocabulary.cpp",
     ],
-    deps = [":decoder"],
+    deps = [":kenlm"],
+    copts = ["-std=c++11"],
 )
 
 cc_binary(
@@ -203,10 +267,5 @@ cc_binary(
         "trie_load.cc",
     ],
     copts = ["-std=c++11"],
-    linkopts = [
-        "-lm",
-        "-ldl",
-        "-pthread",
-    ],
     deps = [":decoder"],
 )
